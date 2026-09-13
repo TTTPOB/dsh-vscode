@@ -38,14 +38,19 @@ status_code="$(curl --silent --show-error --output "$response_file" --write-out 
   -H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' \
   "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$release_tag")"
 release_exists=false
+draft_exists=false
 case "$status_code" in
   404) ;;
   200)
-    if ! jq -e --arg asset "$asset_name" '.draft == false and (.assets | any(.name == $asset and .size > 0))' "$response_file" >/dev/null; then
-      echo "Release $release_tag exists but is incomplete; inspect it before retrying." >&2
+    if jq -e --arg source "$source_commit" '.draft == true and .target_commitish == $source' "$response_file" >/dev/null; then
+      # An interrupted upload can be rebuilt without touching a published release.
+      draft_exists=true
+    elif jq -e --arg asset "$asset_name" '.draft == false and (.assets | any(.name == $asset and .size > 0))' "$response_file" >/dev/null; then
+      release_exists=true
+    else
+      echo "Release $release_tag is incomplete or targets unexpected source; inspect it before retrying." >&2
       exit 1
     fi
-    release_exists=true
     ;;
   *) echo "Failed to check release: HTTP $status_code" >&2; exit 1 ;;
 esac
@@ -60,6 +65,7 @@ fi
   echo "release_tag=$release_tag"
   echo "asset_name=$asset_name"
   echo "release_exists=$release_exists"
+  echo "draft_exists=$draft_exists"
   echo "should_build=$should_build"
 } >> "$GITHUB_OUTPUT"
 {

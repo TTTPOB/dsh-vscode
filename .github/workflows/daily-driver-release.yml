@@ -130,8 +130,15 @@ jobs:
           SOURCE_COMMIT: ${{ steps.source.outputs.source_commit }}
           ASSET_NAME: ${{ steps.source.outputs.asset_name }}
           UPSTREAM_TAG: ${{ steps.source.outputs.upstream_tag }}
+          DRAFT_EXISTS: ${{ steps.source.outputs.draft_exists }}
         run: |
           set -euo pipefail
+          if [[ "$DRAFT_EXISTS" == true ]]; then
+            gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" \
+              | jq -e --arg source "$SOURCE_COMMIT" '.draft == true and .target_commitish == $source' >/dev/null
+            # Recreate only an unpublished draft left by an interrupted run; keep any Git tag.
+            gh release delete "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --yes
+          fi
           gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
             --target "$SOURCE_COMMIT" --draft --latest=false \
             --title "DSH Sidebar daily driver $UPSTREAM_TAG" --notes-file artifacts/release-notes.md
