@@ -1,0 +1,141 @@
+name: Release daily driver VSIX
+
+on:
+  schedule:
+    - cron: '23 2 * * *'
+  workflow_dispatch:
+    inputs:
+      force_build:
+        description: 'Rebuild and upload a CI artifact even if this source already has a release (never overwrite releases).'
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/daily-driver-release.yml'
+      - 'scripts/prepare-daily-driver.sh'
+      - 'scripts/check-webview-theme.mjs'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daily-driver-release
+  cancel-in-progress: false
+
+jobs:
+  build-and-release:
+    if: github.repository == 'TTTPOB/dsh-vscode' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout release automation
+        uses: actions/checkout@v4
+        with:
+          path: automation
+          persist-credentials: false
+      - name: Checkout daily driver
+        uses: actions/checkout@v4
+        with:
+          ref: daily-driver
+          path: source
+          fetch-depth: 0
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Check upstream release and prepare source
+        id: source
+        env:
+          FORCE_BUILD: ${{ inputs.force_build || false }}
+        run: bash automation/scripts/prepare-daily-driver.sh "$GITHUB_WORKSPACE/source"
+      - name: Set up pnpm
+        if: steps.source.outputs.should_build == 'true'
+        uses: pnpm/action-setup@v4
+        with:
+          package_json_file: source/package.json
+          run_install: false
+      - name: Install extension dependencies
+        if: steps.source.outputs.should_build == 'true'
+        working-directory: source
+        run: pnpm install --frozen-lockfile
+      - name: Typecheck and test
+        if: steps.source.outputs.should_build == 'true'
+        working-directory: source
+        run: |
+          pnpm run typecheck
+          pnpm run test
+      - name: Check native controls in Chromium
+        if: steps.source.outputs.should_build == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/theme-check"
+          pnpm --dir "$RUNNER_TEMP/theme-check" add playwright@1.58.2
+          pnpm --dir "$RUNNER_TEMP/theme-check" exec playwright install --with-deps chromium
+          cp automation/scripts/check-webview-theme.mjs "$RUNNER_TEMP/theme-check/check.mjs"
+          node "$RUNNER_TEMP/theme-check/check.mjs" "$GITHUB_WORKSPACE/source/src/webview.ts" "$GITHUB_WORKSPACE/artifacts"
+      - name: Build and package VSIX
+        if: steps.source.outputs.should_build == 'true'
+        working-directory: source
+        run: pnpm run package
+      - name: Prepare installation artifact and provenance
+        if: steps.source.outputs.should_build == 'true'
+        env:
+          ASSET_NAME: ${{ steps.source.outputs.asset_name }}
+          UPSTREAM_TAG: ${{ steps.source.outputs.upstream_tag }}
+          UPSTREAM_COMMIT: ${{ steps.source.outputs.upstream_commit }}
+          SOURCE_COMMIT: ${{ steps.source.outputs.source_commit }}
+        run: |
+          set -euo pipefail
+          test -s source/dsh-vscode.vsix
+          mkdir -p artifacts
+          cp source/dsh-vscode.vsix "artifacts/$ASSET_NAME"
+          (cd artifacts && sha256sum "$ASSET_NAME" > SHA256SUMS)
+          jq -n --arg upstream_tag "$UPSTREAM_TAG" --arg upstream_commit "$UPSTREAM_COMMIT" \
+            --arg source_commit "$SOURCE_COMMIT" --arg automation_commit "$GITHUB_SHA" \
+            '{upstream_repository: "Lixxx1/dsh-vscode", upstream_tag: $upstream_tag, upstream_commit: $upstream_commit, source_commit: $source_commit, automation_commit: $automation_commit}' \
+            > artifacts/provenance.json
+          {
+            echo "DSH Sidebar daily driver based on upstream $UPSTREAM_TAG."
+            echo
+            echo 'Includes the VS Code theme fix for model, reasoning effort, and preset dropdowns.'
+            echo
+            echo "Upstream source: $UPSTREAM_COMMIT"
+            echo "Tested daily-driver source: $SOURCE_COMMIT"
+            echo "Release automation: $GITHUB_SHA"
+            echo
+            echo 'Validation: TypeScript, full unit suite, Chromium theme checks, and VSIX packaging.'
+            echo 'Install the .vsix from VS Code: Extensions → … → Install from VSIX.'
+          } > artifacts/release-notes.md
+      - name: Upload CI artifacts
+        if: always() && steps.source.outputs.should_build == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: daily-driver-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Advance tested daily-driver branch
+        if: steps.source.outputs.should_build == 'true'
+        working-directory: source
+        run: git push origin HEAD:refs/heads/daily-driver
+      - name: Publish immutable GitHub release
+        if: steps.source.outputs.should_build == 'true' && steps.source.outputs.release_exists != 'true'
+        env:
+          RELEASE_TAG: ${{ steps.source.outputs.release_tag }}
+          SOURCE_COMMIT: ${{ steps.source.outputs.source_commit }}
+          ASSET_NAME: ${{ steps.source.outputs.asset_name }}
+          UPSTREAM_TAG: ${{ steps.source.outputs.upstream_tag }}
+        run: |
+          set -euo pipefail
+          gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --target "$SOURCE_COMMIT" --draft --latest=false \
+            --title "DSH Sidebar daily driver $UPSTREAM_TAG" --notes-file artifacts/release-notes.md
+          gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            "artifacts/$ASSET_NAME" artifacts/SHA256SUMS artifacts/provenance.json
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest=false
+          echo "Release: https://github.com/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG" >> "$GITHUB_STEP_SUMMARY"
