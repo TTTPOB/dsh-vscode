@@ -23,6 +23,9 @@ export function chatHtml(webview: vscode.Webview, deepseekMarkUri: vscode.Uri, m
   <link rel="stylesheet" href="${escapeHtml(markdownAssets.style.toString(true))}">
   <style nonce="${token}">
     :root { color-scheme: light dark; }
+    body.vscode-light, body.vscode-high-contrast-light { color-scheme: light; }
+    body.vscode-dark, body.vscode-high-contrast { color-scheme: dark; }
+    select option, select optgroup { color: var(--vscode-dropdown-foreground, var(--vscode-foreground)); background: var(--vscode-dropdown-background, var(--vscode-editor-background)); }
     * { box-sizing: border-box; }
     html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
     body { color: var(--vscode-foreground); background: var(--vscode-sideBar-background); font: 13px/1.5 var(--vscode-font-family); }
